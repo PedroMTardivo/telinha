@@ -126,8 +126,13 @@
 const $ = s => document.querySelector(s);
 
 // Prefixo dos IDs no servidor público do PeerJS (o servidor é só pra "apresentar" os PCs; o vídeo vai direto).
-const PREFIX = 'telinha-v1-';
-const VERSION = 6; // sobe a cada atualização; quem estiver com versão menor aparece com ⚠️
+// Cada pessoa ocupa um "lugar" na sala: telinha-v2-<sala>-p1, -p2, ... Não tem recepção central:
+// quem chega tenta conectar em todos os lugares, e um lugar travado não atrapalha os outros.
+const PREFIX = 'telinha-v2-';
+const MAX_SLOTS = 12;
+const VERSION = 7; // sobe a cada atualização; quem estiver com versão menor aparece com ⚠️
+const slotId = n => PREFIX + S.room + '-p' + n;
+const slotOf = id => +(/-p(\d+)$/.exec(id)?.[1] || 0);
 
 // STUN do Google ajuda os PCs a se acharem pela internet.
 // Se algum amigo nunca conectar (NAT chato / CGNAT), adicione um servidor TURN aqui.
@@ -144,13 +149,11 @@ const QUALITY = {
 };
 
 const S = {
-  name: '', room: '', me: null,
-  hub: null, claiming: false, hubConns: new Map(), hubConn: null, hubTimer: null,
-  peers: new Map(),   // id -> { id, name, sharing, conn, inCall, failed }
+  name: '', room: '', me: null, slot: 0, slotTry: 1, tick: 0,
+  peers: new Map(),   // id -> { id, name, sharing, conn, inCall, failed, seen }
   screen: null, quality: QUALITY.jogo720,
   out: new Map(),     // id -> chamada saindo com a minha tela
   tiles: new Map(),   // id ('me' pra mim) -> { el, video }
-  members: new Map(), // última lista da recepção: id -> nome
   log: [],
   left: false,
 };
@@ -174,7 +177,7 @@ function appendLogLine(line) {
   while (box.childElementCount > 400) box.firstChild.remove();
   if (atBottom) box.scrollTop = box.scrollHeight;
 }
-function who(id) { return S.peers.get(id)?.name || S.members.get(id) || String(id).slice(0, 6); }
+function who(id) { const n = S.peers.get(id)?.name; return n && n !== '…' ? n : 'lugar ' + slotOf(id); }
 
 // Fica de olho numa conexão WebRTC: se cair de vez (ou ficar "disconnected" por 8s), avisa.
 function watchPc(pc, label, onDead) {
@@ -182,7 +185,7 @@ function watchPc(pc, label, onDead) {
   let t;
   pc.addEventListener('connectionstatechange', () => {
     const s = pc.connectionState;
-    log(label, '→', s);
+    log(typeof label === 'function' ? label() : label, '→', s);
     clearTimeout(t);
     if (s === 'failed') onDead();
     else if (s === 'disconnected') t = setTimeout(() => {
@@ -222,7 +225,7 @@ window.addEventListener('hashchange', () => {
   const r = slug(decodeURIComponent(location.hash.slice(1)));
   if (!r) return;
   if (!S.me) $('#room').value = r;
-  else if (r !== S.room) { shutdown(); location.reload(); }
+  else if (r !== S.room) { try { sessionStorage.setItem('telinha.in', r); } catch {} shutdown(); location.reload(); }
 });
 $('#ver').textContent = 'v' + VERSION;
 
@@ -233,6 +236,7 @@ function join() {
   S.room = room;
   store.set('telinha.name', S.name);
   try { history.replaceState(null, '', '#' + room); } catch {}
+  try { sessionStorage.setItem('telinha.in', room); } catch {} // F5 volta direto pra sala
 
   $('#lobby').hidden = true; $('#app').hidden = false;
   $('#roomName').textContent = room;
@@ -244,26 +248,76 @@ function join() {
   updateUpload();
   status('Conectando ao servidor…');
 
-  S.me = new Peer({ config: ICE, debug: 1 });
-  S.me.on('open', id => { log('conectado ao servidor de sinalização, meu id', id); status(''); claimHub(); renderPeople(); });
-  S.me.on('connection', c => { if (c.metadata?.kind === 'peer') setupConn(c); else c.close(); });
-  S.me.on('call', onCall);
-  S.me.on('disconnected', () => {
-    if (S.left) return;
-    log('servidor de sinalização desconectou');
-    status('Conexão com o servidor caiu, reconectando… (quem já está conectado continua vendo)');
-    S.lastRecon = Date.now();
-    setTimeout(() => { try { if (!S.me.destroyed) S.me.reconnect(); } catch {} }, 1500);
+  S.slotTry = 1;
+  startPeer();
+}
+
+// Pega o primeiro lugar livre da sala (1, 2, 3…). Lugar ocupado, até por alguém travado, só pula pro próximo.
+function startPeer() {
+  if (S.left) return;
+  if (S.slotTry > MAX_SLOTS) { status(`A sala está cheia (máximo ${MAX_SLOTS} lugares).`); log('sala cheia'); return; }
+  const n = S.slotTry;
+  const peer = new Peer(slotId(n), { config: ICE, debug: 0 });
+  let opened = false;
+  peer.on('open', () => {
+    if (opened) { if (S.me === peer) { log('reconectado ao servidor'); status(''); } return; }
+    opened = true; S.me = peer; S.slot = n;
+    log(`conectado ao servidor: você está no lugar ${n} da sala`);
+    status('');
+    peer.on('connection', c => { if (c.metadata?.kind === 'peer') setupConn(c); else c.close(); });
+    peer.on('call', onCall);
+    peer.on('disconnected', () => {
+      if (S.left) return;
+      log('servidor de sinalização desconectou');
+      status('Conexão com o servidor caiu, reconectando… (quem já está conectado continua vendo)');
+      S.lastRecon = Date.now();
+      setTimeout(() => { try { if (!peer.destroyed) peer.reconnect(); } catch {} }, 1500);
+    });
+    probeAll(true);
+    renderPeople();
   });
-  S.me.on('error', onMeError);
+  peer.on('error', e => {
+    if (opened) { onMeError(e); return; }
+    try { peer.destroy(); } catch {}
+    if (e.type === 'unavailable-id') { log(`lugar ${n} ocupado`); S.slotTry++; startPeer(); return; }
+    log('erro ao conectar no servidor:', e.type);
+    status('Sem conexão com o servidor (0.peerjs.com). Tentando de novo…');
+    setTimeout(startPeer, 3000);
+  });
+}
+
+// Tenta conectar nos outros lugares. Quem acabou de chegar procura todo mundo;
+// depois disso, a cada 8s, o lugar menor procura os maiores (pra achar quem chegar).
+function probeAll(initial) {
+  if (!S.me || S.me.disconnected || S.left) return;
+  for (let n = 1; n <= MAX_SLOTS; n++) {
+    if (n === S.slot) continue;
+    const id = slotId(n);
+    if (S.peers.get(id)?.conn) continue; // já conectado ou tentando
+    if (initial || S.slot < n) linkPeer(id);
+  }
 }
 
 function onMeError(e) {
-  log('erro peer:', e.type, e.message || '');
   if (e.type === 'peer-unavailable') {
-    if (String(e.message).includes(PREFIX)) hubLost(); // a "recepção" da sala sumiu
+    // Lugar vazio (normal ao procurar) ou alguém que saiu.
+    const id = String(e.message || '').replace(/^.*peer\s+/i, '').trim();
+    const p = S.peers.get(id);
+    if (p && !p.conn?.open) {
+      const c = p.conn; p.conn = null;
+      if (p.seen) { log(who(id), 'não está mais na sala'); if (!videoAlive(p)) dropPeer(id); }
+      else if (!videoAlive(p)) S.peers.delete(id);
+      try { c?.close(); } catch {}
+    }
     return;
   }
+  if (e.type === 'unavailable-id') { // caí do servidor e alguém pegou meu lugar: entra de novo
+    log('perdi meu lugar na sala, entrando de novo');
+    try { sessionStorage.setItem('telinha.in', S.room); } catch {}
+    shutdown(); location.reload();
+    return;
+  }
+  log('erro peer:', e.type, e.message || '');
   if (['network', 'server-error', 'socket-error', 'socket-closed'].includes(e.type)) {
     status('Sem conexão com o servidor de sinalização (0.peerjs.com). Tentando de novo…');
   } else if (e.type === 'browser-incompatible') {
@@ -271,133 +325,47 @@ function onMeError(e) {
   }
 }
 
-/* ---------- "Recepção" da sala ----------
-   Quem chega primeiro registra o ID da sala no servidor e vira a recepção: só guarda a lista de quem está na sala.
-   Se essa pessoa sair, outro assume sozinho. O vídeo nunca passa por ela. */
-function claimHub() {
-  if (S.left || S.claiming) return;
-  if (S.hub) { connectToHub(); return; }
-  if (S.hubConn) return;
-  S.claiming = true;
-  const h = new Peer(PREFIX + S.room, { config: ICE, debug: 1 });
-  let settled = false;
-  h.on('open', () => {
-    settled = true; S.claiming = false; S.hub = h;
-    log('a sala estava vazia: agora você é a recepção');
-    setupHub(h); connectToHub();
-  });
-  h.on('error', e => {
-    if (settled) { console.warn('[hub]', e.type); return; }
-    settled = true; S.claiming = false;
-    try { h.destroy(); } catch {}
-    if (e.type === 'unavailable-id') { log('a sala já tem recepção, entrando…'); connectToHub(); }
-    else { log('erro ao abrir a sala:', e.type); S.hubTimer = setTimeout(claimHub, 3000); }
-  });
-}
-
-function setupHub(h) {
-  h.on('connection', c => {
-    c.on('data', d => {
-      if (d && d.t === 'join') {
-        S.hubConns.set(c.peer, { conn: c, name: String(d.name || '?').slice(0, 24) });
-        hubBroadcast();
-      }
-    });
-    c.on('close', () => {
-      const r = S.hubConns.get(c.peer);
-      if (r && r.conn === c) { S.hubConns.delete(c.peer); hubBroadcast(); }
-    });
-  });
-  h.on('disconnected', () => { if (!S.left) setTimeout(() => { try { if (!h.destroyed) h.reconnect(); } catch {} }, 1500); });
-}
-
-function hubBroadcast() {
-  const list = [...S.hubConns].map(([id, r]) => ({ id, name: r.name }));
-  for (const r of S.hubConns.values()) if (r.conn.open) r.conn.send({ t: 'members', list });
-}
-
-function connectToHub() {
-  if (S.left || S.hubConn || !S.me || S.me.disconnected) return;
-  const c = S.me.connect(PREFIX + S.room, { reliable: true, metadata: { kind: 'hub' } });
-  if (!c) return;
-  S.hubConn = c;
-  const t0 = Date.now();
-  if (!S.members.size) status('Procurando a sala…');
-  // Pela internet a conexão pode levar 10s ou mais. Só desiste se ela não estiver andando:
-  // sem resposta nenhuma ("new") em 12s, ou 30s no total.
-  const timer = setInterval(() => {
-    if (c.open || S.hubConn !== c) { clearInterval(timer); return; }
-    const st = c.peerConnection?.connectionState || 'new';
-    const secs = (Date.now() - t0) / 1000;
-    if (st === 'failed' || (st === 'new' && secs >= 12) || secs >= 30) {
-      clearInterval(timer);
-      log(`a recepção não respondeu em ${Math.round(secs)}s (estado: ${st})`);
-      hubLost();
-    }
-  }, 2000);
-  c.on('open', () => {
-    clearInterval(timer);
-    log(`entrei na sala (levou ${((Date.now() - t0) / 1000).toFixed(1)}s)`);
-    status('');
-    c.send({ t: 'join', name: S.name });
-  });
-  c.on('data', d => { if (d && d.t === 'members') onMembers(d.list || []); });
-  c.on('close', () => { clearInterval(timer); if (S.hubConn === c) hubLost(); });
-  c.on('error', () => { if (S.hubConn === c) hubLost(); });
-}
-
-function hubLost() {
-  const c = S.hubConn; S.hubConn = null;
-  log('perdi contato com a recepção da sala, procurando de novo');
-  if (c) try { c.close(); } catch {}
-  clearTimeout(S.hubTimer);
-  if (!S.left) S.hubTimer = setTimeout(claimHub, 300 + Math.random() * 1500);
-}
-
 /* ---------- Conexões diretas entre os amigos ---------- */
 function peerRec(id) {
   let p = S.peers.get(id);
-  if (!p) { p = { id, name: S.members.get(id) || '…', sharing: false, conn: null, inCall: null, failed: false }; S.peers.set(id, p); }
+  if (!p) { p = { id, name: '…', sharing: false, conn: null, inCall: null, failed: false, seen: false }; S.peers.set(id, p); }
   return p;
-}
-
-function onMembers(list) {
-  const ids = new Set(list.map(m => m.id));
-  S.members = new Map(list.map(m => [m.id, String(m.name || '?').slice(0, 24)]));
-  for (const m of list) {
-    if (m.id === S.me.id) continue;
-    const p = peerRec(m.id);
-    if (!p.conn?.open) p.name = String(m.name || '?').slice(0, 24);
-    // Só um dos dois lados inicia a conexão (o de ID menor), pra não duplicar.
-    if (!p.conn && S.me.id < m.id) linkPeer(m.id);
-  }
-  for (const p of [...S.peers.values()]) if (!ids.has(p.id) && !p.conn?.open && !videoAlive(p)) dropPeer(p.id);
-  renderPeople();
 }
 
 function linkPeer(id) {
   if (!S.me || S.me.disconnected) return;
   const c = S.me.connect(id, { reliable: true, metadata: { kind: 'peer' } });
   if (!c) return;
+  c._out = true;
   peerRec(id).lastTry = Date.now();
   setupConn(c);
   setTimeout(() => {
     if (c.open) return;
     const p = S.peers.get(id);
-    if (p && p.conn === c) { log('não consegui conectar com', who(id)); p.conn = null; p.failed = true; renderPeople(); }
+    if (p && p.conn === c) {
+      p.conn = null;
+      if (p.seen) { log('não consegui conectar com', who(id)); p.failed = true; renderPeople(); }
+      else if (!videoAlive(p)) S.peers.delete(id); // lugar travado/vazio: ignora em silêncio
+    }
     try { c.close(); } catch {}
   }, 20000);
 }
 
-// Quem tem o ID menor é quem (re)abre a conexão. Se chegar uma conexão nova de alguém,
-// é porque o outro lado achou que a antiga morreu: fica a nova.
+// Se as duas pontas tentarem ao mesmo tempo, fica a conexão aberta pelo lugar menor.
+// Fora isso, uma conexão nova substitui a antiga (o outro lado achou que ela morreu).
 function setupConn(c) {
   const id = c.peer, p = peerRec(id);
   const old = p.conn;
+  if (old && old !== c) {
+    if (!c._out && old._out && !old.open && S.slot < slotOf(id)) { c.close(); return; }
+    if (old.open) log('trocando conexão antiga com', who(id));
+    try { old.close(); } catch {}
+  }
   p.conn = c; p.failed = false;
-  if (old && old !== c) { log('trocando conexão antiga com', who(id)); try { old.close(); } catch {} }
   c.on('open', () => {
-    log('conectado com', who(id));
+    const q = S.peers.get(id);
+    if (q?.conn !== c) { try { c.close(); } catch {} return; }
+    q.seen = true; q.lostAt = 0;
     c.send({ t: 'hello', v: VERSION, name: S.name, sharing: !!S.screen });
     if (S.screen && !alive(S.out.get(id))) callScreen(id);
     renderPeople(); updateUpload();
@@ -409,12 +377,12 @@ function setupConn(c) {
     connLost(id);
   });
   c.on('error', e => {
-    log('erro conexão', who(id), e.type, e.message || '');
+    const q = S.peers.get(id);
+    if (q?.seen) log('erro conexão', who(id), e.type, e.message || '');
     // Falhou antes de abrir? Não espera o timeout: tenta de novo já.
-    const p = S.peers.get(id);
-    if (!c.open && p?.conn === c) { p.conn = null; try { c.close(); } catch {} scheduleRelink(id); }
+    if (!c.open && q?.conn === c) { q.conn = null; try { c.close(); } catch {} if (q.seen) scheduleRelink(id); else if (!videoAlive(q)) S.peers.delete(id); }
   });
-  watchPc(c.peerConnection, 'conexão ' + who(id), () => { try { c.close(); } catch {} });
+  watchPc(c.peerConnection, () => 'conexão ' + who(id), () => { try { c.close(); } catch {} });
 }
 
 // Dados e vídeo são conexões separadas. Se só a de dados cair, o vídeo continua e a gente reconecta os dados por trás.
@@ -424,17 +392,17 @@ function videoAlive(p) { return alive(p.inCall) || alive(S.out.get(p.id)); }
 function connLost(id) {
   const p = S.peers.get(id);
   if (!p) return;
-  p.conn = null;
-  if (!S.members.has(id) && !videoAlive(p)) { dropPeer(id); return; }
+  p.conn = null; p.lostAt = Date.now();
   if (videoAlive(p)) log('vídeo com', who(id), 'continua; reconectando só os dados');
   renderPeople(); updateUpload();
   scheduleRelink(id);
 }
 
+// Reconexão rápida: quem está no lugar menor reabre. (O vigia também tenta a cada 8s.)
 function scheduleRelink(id) {
-  if (S.left || !S.members.has(id) || !(S.me.id < id)) return;
+  if (S.left || !(S.slot < slotOf(id))) return;
   setTimeout(() => {
-    if (S.left || !S.members.has(id) || S.peers.get(id)?.conn) return;
+    if (S.left || !S.peers.has(id) || S.peers.get(id)?.conn) return;
     log('reconectando com', who(id));
     linkPeer(id);
   }, 1000 + Math.random() * 1000);
@@ -445,11 +413,12 @@ function onPeerData(id, d) {
   if (!p || !d) return;
   if (d.t === 'hello') {
     p.name = String(d.name || '?').slice(0, 24); p.sharing = !!d.sharing;
+    log('conectado com', p.name);
     p.old = !(d.v >= VERSION);
     if (p.old) log(p.name, 'está com uma versão antiga do Telinha');
   }
   else if (d.t === 'sharing') { p.sharing = !!d.on; if (!d.on) closeIn(id); }
-  else if (d.t === 'bye') { log(who(id), 'saiu da sala'); S.members.delete(id); dropPeer(id); return; }
+  else if (d.t === 'bye') { log(who(id), 'saiu da sala'); dropPeer(id); return; }
   else if (d.t === 'want') { log(who(id), 'pediu o vídeo de novo'); if (S.screen) callScreen(id); return; }
   renderPeople(); updateTileLabel(id);
 }
@@ -527,11 +496,13 @@ setInterval(() => {
     S.lastRecon = now; try { S.me.reconnect(); } catch {}
   }
   if (S.me.disconnected) return;
-  // Alguém da sala sem conexão? Reconecta (se for minha vez).
-  for (const id of S.members.keys()) {
-    if (id === S.me.id || !(S.me.id < id)) continue;
-    const p = S.peers.get(id);
-    if (!p?.conn && now - (p?.lastTry || 0) > 5000) linkPeer(id);
+  // A cada 8s: procura quem chegou / reconecta quem caiu (o lugar menor procura os maiores).
+  if (++S.tick % 4 === 0) probeAll(false);
+  // Sumiu há 30s sem conexão nem vídeo? Tira da lista.
+  for (const p of [...S.peers.values()]) {
+    if (p.seen && !p.conn && p.lostAt && now - p.lostAt > 30000 && !videoAlive(p)) {
+      log(p.name, 'sumiu (sem resposta há 30s)'); dropPeer(p.id);
+    }
   }
   // Alguém está transmitindo mas o vídeo não chegou? Pede de novo.
   for (const p of S.peers.values()) {
@@ -630,14 +601,17 @@ function renderPeople() {
     box.appendChild(s);
   };
   add(S.name + ' (você)' + (S.screen ? ' · 🔴 ao vivo' : ''), 'ok');
+  let n = 1;
   for (const p of S.peers.values()) {
+    if (!p.seen) continue; // lugares vazios/travados não aparecem
+    n++;
     const st = p.conn?.open ? 'ok' : (p.failed && !videoAlive(p) ? 'bad' : 'wait');
     let title = st === 'bad' ? 'Não conseguiu conectar direto com essa pessoa (rede/NAT). Ver TURN no código.'
       : st === 'wait' ? (videoAlive(p) ? 'Reconectando (o vídeo continua)…' : 'Conectando…') : '';
     if (p.old) title = 'Essa pessoa está com uma versão antiga do Telinha: pede pra ela atualizar o arquivo/página. ' + title;
     add(p.name + (p.sharing ? ' · 🔴 ao vivo' : '') + (p.old ? ' · ⚠️ versão antiga' : ''), st, title);
   }
-  $('#count').textContent = 1 + S.peers.size;
+  $('#count').textContent = n;
 }
 
 function updateShareBtn() {
@@ -693,8 +667,8 @@ $('#logBtn').addEventListener('click', () => {
 $('#logClose').addEventListener('click', () => { $('#logPanel').hidden = true; $('#logBtn').classList.remove('on'); });
 
 $('#logCopy').addEventListener('click', async () => {
-  const peers = [...S.peers.values()].map(p => `  ${p.name}: ${p.conn?.open ? 'conectado' : 'sem conexão'}${p.sharing ? ', transmitindo' : ''}${S.tiles.has(p.id) ? ', vídeo chegando' : ''}`);
-  const txt = [`Telinha v${VERSION} · sala #${S.room} · ${S.name} · ${new Date().toLocaleString('pt-BR')}`,
+  const peers = [...S.peers.values()].filter(p => p.seen).map(p => `  ${p.name}: ${p.conn?.open ? 'conectado' : 'sem conexão'}${p.sharing ? ', transmitindo' : ''}${S.tiles.has(p.id) ? ', vídeo chegando' : ''}`);
+  const txt = [`Telinha v${VERSION} · sala #${S.room} · ${S.name} (lugar ${S.slot}) · ${new Date().toLocaleString('pt-BR')}`,
     `transmitindo: ${S.screen ? 'sim (' + S.quality.label + ')' : 'não'}`, 'pessoas:', ...peers, '', ...S.log].join('\n');
   try { await navigator.clipboard.writeText(txt); toast('Log copiado!'); } catch { prompt('Copia aí:', txt); }
 });
@@ -710,10 +684,18 @@ function shutdown() {
   S.left = true;
   try { stopShare(); } catch {}
   try { S.me?.destroy(); } catch {}
-  try { S.hub?.destroy(); } catch {}
 }
-$('#leave').addEventListener('click', () => { sayBye(); setTimeout(() => { shutdown(); location.reload(); }, 300); });
+$('#leave').addEventListener('click', () => {
+  try { sessionStorage.removeItem('telinha.in'); } catch {}
+  sayBye(); setTimeout(() => { shutdown(); location.reload(); }, 300);
+});
 window.addEventListener('pagehide', shutdown);
+
+// Deu F5 dentro de uma sala? Entra de novo direto, sem passar pelo lobby.
+try {
+  const r = slug(decodeURIComponent(location.hash.slice(1)));
+  if (r && sessionStorage.getItem('telinha.in') === r && $('#name').value.trim()) { $('#room').value = r; join(); }
+} catch {}
 </script>
 </body>
 </html>
