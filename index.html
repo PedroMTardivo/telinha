@@ -127,7 +127,7 @@ const $ = s => document.querySelector(s);
 
 // Prefixo dos IDs no servidor público do PeerJS (o servidor é só pra "apresentar" os PCs; o vídeo vai direto).
 const PREFIX = 'telinha-v1-';
-const VERSION = 5; // sobe a cada atualização; quem estiver com versão menor aparece com ⚠️
+const VERSION = 6; // sobe a cada atualização; quem estiver com versão menor aparece com ⚠️
 
 // STUN do Google ajuda os PCs a se acharem pela internet.
 // Se algum amigo nunca conectar (NAT chato / CGNAT), adicione um servidor TURN aqui.
@@ -283,14 +283,15 @@ function claimHub() {
   let settled = false;
   h.on('open', () => {
     settled = true; S.claiming = false; S.hub = h;
+    log('a sala estava vazia: agora você é a recepção');
     setupHub(h); connectToHub();
   });
   h.on('error', e => {
     if (settled) { console.warn('[hub]', e.type); return; }
     settled = true; S.claiming = false;
     try { h.destroy(); } catch {}
-    if (e.type === 'unavailable-id') connectToHub();   // já tem recepção: só entrar
-    else S.hubTimer = setTimeout(claimHub, 3000);
+    if (e.type === 'unavailable-id') { log('a sala já tem recepção, entrando…'); connectToHub(); }
+    else { log('erro ao abrir a sala:', e.type); S.hubTimer = setTimeout(claimHub, 3000); }
   });
 }
 
@@ -318,11 +319,30 @@ function hubBroadcast() {
 function connectToHub() {
   if (S.left || S.hubConn || !S.me || S.me.disconnected) return;
   const c = S.me.connect(PREFIX + S.room, { reliable: true, metadata: { kind: 'hub' } });
+  if (!c) return;
   S.hubConn = c;
-  const timer = setTimeout(() => { if (!c.open && S.hubConn === c) hubLost(); }, 6000);
-  c.on('open', () => { clearTimeout(timer); c.send({ t: 'join', name: S.name }); });
+  const t0 = Date.now();
+  if (!S.members.size) status('Procurando a sala…');
+  // Pela internet a conexão pode levar 10s ou mais. Só desiste se ela não estiver andando:
+  // sem resposta nenhuma ("new") em 12s, ou 30s no total.
+  const timer = setInterval(() => {
+    if (c.open || S.hubConn !== c) { clearInterval(timer); return; }
+    const st = c.peerConnection?.connectionState || 'new';
+    const secs = (Date.now() - t0) / 1000;
+    if (st === 'failed' || (st === 'new' && secs >= 12) || secs >= 30) {
+      clearInterval(timer);
+      log(`a recepção não respondeu em ${Math.round(secs)}s (estado: ${st})`);
+      hubLost();
+    }
+  }, 2000);
+  c.on('open', () => {
+    clearInterval(timer);
+    log(`entrei na sala (levou ${((Date.now() - t0) / 1000).toFixed(1)}s)`);
+    status('');
+    c.send({ t: 'join', name: S.name });
+  });
   c.on('data', d => { if (d && d.t === 'members') onMembers(d.list || []); });
-  c.on('close', () => { clearTimeout(timer); if (S.hubConn === c) hubLost(); });
+  c.on('close', () => { clearInterval(timer); if (S.hubConn === c) hubLost(); });
   c.on('error', () => { if (S.hubConn === c) hubLost(); });
 }
 
@@ -366,7 +386,7 @@ function linkPeer(id) {
     const p = S.peers.get(id);
     if (p && p.conn === c) { log('não consegui conectar com', who(id)); p.conn = null; p.failed = true; renderPeople(); }
     try { c.close(); } catch {}
-  }, 10000);
+  }, 20000);
 }
 
 // Quem tem o ID menor é quem (re)abre a conexão. Se chegar uma conexão nova de alguém,
