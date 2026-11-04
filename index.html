@@ -63,6 +63,16 @@
   .tile .vol { width: 90px; accent-color: var(--accent); }
   .tile:fullscreen { border-radius: 0; max-height: none; }
 
+  #logPanel { display: flex; flex-direction: column; height: 32vh; min-height: 150px; background: var(--panel); border-top: 1px solid var(--line); }
+  #logPanel[hidden] { display: none; }
+  #logPanel .head { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--line); }
+  #logPanel .head .grow { flex: 1; }
+  #logPanel .head button { padding: 4px 10px; font-size: 13px; }
+  #logBox { flex: 1; overflow: auto; padding: 8px 12px; font: 12px/1.55 ui-monospace, Consolas, monospace; color: var(--muted); white-space: pre-wrap; word-break: break-word; }
+  #logBox .bad { color: #f08a8a; }
+  #logBox .good { color: #7fdcb0; }
+  #logBtn.on { border-color: var(--accent); }
+
   #toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); background: var(--panel2); border: 1px solid var(--line); padding: 10px 16px; border-radius: 10px; max-width: calc(100% - 32px); opacity: 0; pointer-events: none; transition: opacity .2s; }
   #toast.on { opacity: 1; }
 </style>
@@ -90,7 +100,7 @@
     </label>
     <span id="upl"></span>
     <button id="share" class="primary">🖥️ Compartilhar tela</button>
-    <button id="logBtn" title="Copia o log de conexão. Se der problema, cada um copia o seu e manda.">📋 Log</button>
+    <button id="logBtn" title="Mostra o log de conexão. Se der problema, cada um copia o seu e manda.">📋 Log</button>
     <button id="leave" title="Sair da sala">Sair</button>
   </header>
   <div id="status"></div>
@@ -99,6 +109,15 @@
     <div id="grid"></div>
     <div id="empty">Ninguém compartilhando ainda. Clica em <b>Compartilhar tela</b> ou espera um amigo.</div>
   </main>
+  <section id="logPanel" hidden>
+    <div class="head">
+      <b>Log de conexão</b>
+      <span class="grow"></span>
+      <button id="logCopy" title="Copia o log com o resumo de quem está conectado">Copiar</button>
+      <button id="logClose">Fechar</button>
+    </div>
+    <div id="logBox"></div>
+  </section>
 </div>
 
 <div id="toast"></div>
@@ -108,7 +127,7 @@ const $ = s => document.querySelector(s);
 
 // Prefixo dos IDs no servidor público do PeerJS (o servidor é só pra "apresentar" os PCs; o vídeo vai direto).
 const PREFIX = 'telinha-v1-';
-const VERSION = 3; // sobe a cada atualização; quem estiver com versão menor aparece com ⚠️
+const VERSION = 4; // sobe a cada atualização; quem estiver com versão menor aparece com ⚠️
 
 // STUN do Google ajuda os PCs a se acharem pela internet.
 // Se algum amigo nunca conectar (NAT chato / CGNAT), adicione um servidor TURN aqui.
@@ -140,6 +159,20 @@ function log(...a) {
   const line = new Date().toLocaleTimeString('pt-BR') + '  ' + a.join(' ');
   S.log.push(line); if (S.log.length > 400) S.log.shift();
   console.log('[telinha]', line);
+  appendLogLine(line);
+}
+
+function appendLogLine(line) {
+  const box = document.getElementById('logBox');
+  if (!box) return;
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  const d = document.createElement('div');
+  d.textContent = line;
+  if (/erro|fechou|caiu|failed|disconnected|desconectou|não consegui|perdi|antiga|sem vídeo/i.test(line)) d.className = 'bad';
+  else if (/→ connected|conectado com|conectado ao/i.test(line)) d.className = 'good';
+  box.appendChild(d);
+  while (box.childElementCount > 400) box.firstChild.remove();
+  if (atBottom) box.scrollTop = box.scrollHeight;
 }
 function who(id) { return S.peers.get(id)?.name || S.members.get(id) || String(id).slice(0, 6); }
 
@@ -625,7 +658,15 @@ $('#copy').addEventListener('click', async () => {
   } catch { prompt('Copia aí:', txt); }
 });
 
-$('#logBtn').addEventListener('click', async () => {
+$('#logBtn').addEventListener('click', () => {
+  const panel = $('#logPanel');
+  panel.hidden = !panel.hidden;
+  $('#logBtn').classList.toggle('on', !panel.hidden);
+  if (!panel.hidden) { const b = $('#logBox'); b.scrollTop = b.scrollHeight; }
+});
+$('#logClose').addEventListener('click', () => { $('#logPanel').hidden = true; $('#logBtn').classList.remove('on'); });
+
+$('#logCopy').addEventListener('click', async () => {
   const peers = [...S.peers.values()].map(p => `  ${p.name}: ${p.conn?.open ? 'conectado' : 'sem conexão'}${p.sharing ? ', transmitindo' : ''}${S.tiles.has(p.id) ? ', vídeo chegando' : ''}`);
   const txt = [`Telinha v${VERSION} · sala #${S.room} · ${S.name} · ${new Date().toLocaleString('pt-BR')}`,
     `transmitindo: ${S.screen ? 'sim (' + S.quality.label + ')' : 'não'}`, 'pessoas:', ...peers, '', ...S.log].join('\n');
