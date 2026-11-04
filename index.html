@@ -127,7 +127,7 @@ const $ = s => document.querySelector(s);
 
 // Prefixo dos IDs no servidor público do PeerJS (o servidor é só pra "apresentar" os PCs; o vídeo vai direto).
 const PREFIX = 'telinha-v1-';
-const VERSION = 4; // sobe a cada atualização; quem estiver com versão menor aparece com ⚠️
+const VERSION = 5; // sobe a cada atualização; quem estiver com versão menor aparece com ⚠️
 
 // STUN do Google ajuda os PCs a se acharem pela internet.
 // Se algum amigo nunca conectar (NAT chato / CGNAT), adicione um servidor TURN aqui.
@@ -319,7 +319,7 @@ function connectToHub() {
   if (S.left || S.hubConn || !S.me || S.me.disconnected) return;
   const c = S.me.connect(PREFIX + S.room, { reliable: true, metadata: { kind: 'hub' } });
   S.hubConn = c;
-  const timer = setTimeout(() => { if (!c.open && S.hubConn === c) hubLost(); }, 10000);
+  const timer = setTimeout(() => { if (!c.open && S.hubConn === c) hubLost(); }, 6000);
   c.on('open', () => { clearTimeout(timer); c.send({ t: 'join', name: S.name }); });
   c.on('data', d => { if (d && d.t === 'members') onMembers(d.list || []); });
   c.on('close', () => { clearTimeout(timer); if (S.hubConn === c) hubLost(); });
@@ -366,7 +366,7 @@ function linkPeer(id) {
     const p = S.peers.get(id);
     if (p && p.conn === c) { log('não consegui conectar com', who(id)); p.conn = null; p.failed = true; renderPeople(); }
     try { c.close(); } catch {}
-  }, 15000);
+  }, 10000);
 }
 
 // Quem tem o ID menor é quem (re)abre a conexão. Se chegar uma conexão nova de alguém,
@@ -388,7 +388,12 @@ function setupConn(c) {
     log('conexão com', who(id), 'fechou');
     connLost(id);
   });
-  c.on('error', e => log('erro conexão', who(id), e.type));
+  c.on('error', e => {
+    log('erro conexão', who(id), e.type, e.message || '');
+    // Falhou antes de abrir? Não espera o timeout: tenta de novo já.
+    const p = S.peers.get(id);
+    if (!c.open && p?.conn === c) { p.conn = null; try { c.close(); } catch {} scheduleRelink(id); }
+  });
   watchPc(c.peerConnection, 'conexão ' + who(id), () => { try { c.close(); } catch {} });
 }
 
@@ -424,6 +429,7 @@ function onPeerData(id, d) {
     if (p.old) log(p.name, 'está com uma versão antiga do Telinha');
   }
   else if (d.t === 'sharing') { p.sharing = !!d.on; if (!d.on) closeIn(id); }
+  else if (d.t === 'bye') { log(who(id), 'saiu da sala'); S.members.delete(id); dropPeer(id); return; }
   else if (d.t === 'want') { log(who(id), 'pediu o vídeo de novo'); if (S.screen) callScreen(id); return; }
   renderPeople(); updateTileLabel(id);
 }
@@ -673,13 +679,20 @@ $('#logCopy').addEventListener('click', async () => {
   try { await navigator.clipboard.writeText(txt); toast('Log copiado!'); } catch { prompt('Copia aí:', txt); }
 });
 
+// Avisa todo mundo que estou saindo, pra ninguém ficar esperando a conexão morrer sozinha.
+function sayBye() {
+  for (const p of S.peers.values()) if (p.conn?.open) try { p.conn.send({ t: 'bye' }); } catch {}
+}
+
 function shutdown() {
+  if (S.left) return;
+  sayBye();
   S.left = true;
   try { stopShare(); } catch {}
   try { S.me?.destroy(); } catch {}
   try { S.hub?.destroy(); } catch {}
 }
-$('#leave').addEventListener('click', () => { shutdown(); location.reload(); });
+$('#leave').addEventListener('click', () => { sayBye(); setTimeout(() => { shutdown(); location.reload(); }, 300); });
 window.addEventListener('pagehide', shutdown);
 </script>
 </body>
