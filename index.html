@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Telinha</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="icon" href="icon-192.png" type="image/png" sizes="192x192">
+<meta name="theme-color" content="#0f1115">
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <style>
   :root {
@@ -94,6 +98,7 @@
     <label>Sala <input type="text" id="room" maxlength="40" autocomplete="off"></label>
     <button class="primary" type="submit">Entrar</button>
   </form>
+  <button class="install" type="button" hidden style="width:100%;margin-top:12px">⬇️ Instalar o Telinha no PC</button>
 </div>
 
 <div id="app" hidden>
@@ -108,7 +113,8 @@
     <span id="upl"></span>
     <button id="camBtn" title="Liga sua câmera pros amigos (sem som: a voz continua no Discord)">📷 Câmera</button>
     <button id="share" class="primary">🖥️ Compartilhar tela</button>
-    <button id="logBtn" title="Mostra o log de conexão. Se der problema, cada um copia o seu e manda.">📋 Log</button>
+    <button class="install" hidden title="Instala o Telinha como app no PC (ícone no menu Iniciar, janela própria)">⬇️ Instalar</button>
+    <button id="logBtn"title="Mostra o log de conexão. Se der problema, cada um copia o seu e manda.">📋 Log</button>
     <button id="leave" title="Sair da sala">Sair</button>
   </header>
   <div id="status"></div>
@@ -139,7 +145,7 @@ const $ = s => document.querySelector(s);
 const PREFIX = 'telinha-v2-';
 const MAX_SLOTS = 12;
 const esc = s => String(s).replace(/[&<>"']/g, c => '&#' + c.charCodeAt(0) + ';');
-const VERSION = 9; // sobe a cada atualização; quem estiver com versão menor aparece com ⚠️
+const VERSION = 10; // sobe a cada atualização; quem estiver com versão menor aparece com ⚠️
 const slotId = n => PREFIX + S.room + '-p' + n;
 const slotOf = id => +(/-p(\d+)$/.exec(id)?.[1] || 0);
 
@@ -239,6 +245,18 @@ window.addEventListener('hashchange', () => {
   else if (r !== S.room) { try { sessionStorage.setItem('telinha.in', r); } catch {} shutdown(); location.reload(); }
 });
 $('#ver').textContent = 'v' + VERSION;
+
+// Instalar como app (Chrome/Edge): o navegador avisa quando dá pra instalar, aí mostra o botão.
+let installEvt = null;
+const showInstall = on => document.querySelectorAll('.install').forEach(b => b.hidden = !on);
+window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; showInstall(true); });
+window.addEventListener('appinstalled', () => { installEvt = null; showInstall(false); toast('Instalado! O Telinha está no menu Iniciar.'); });
+document.querySelectorAll('.install').forEach(b => b.addEventListener('click', async () => {
+  if (!installEvt) return;
+  installEvt.prompt();
+  try { await installEvt.userChoice; } catch {}
+  installEvt = null; showInstall(false);
+}));
 
 function join() {
   const room = slug($('#room').value);
