@@ -77,7 +77,8 @@
   #logBox { flex: 1; overflow: auto; padding: 8px 12px; font: 12px/1.55 ui-monospace, Consolas, monospace; color: var(--muted); white-space: pre-wrap; word-break: break-word; }
   #logBox .bad { color: #f08a8a; }
   #logBox .good { color: #7fdcb0; }
-  #logBtn.on { border-color: var(--accent); }
+  #logBtn.on, #camBtn.on { border-color: var(--accent); }
+  .tile.mecam video { transform: scaleX(-1); } /* sua câmera aparece espelhada só pra você */
 
   #toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); background: var(--panel2); border: 1px solid var(--line); padding: 10px 16px; border-radius: 10px; max-width: calc(100% - 32px); opacity: 0; pointer-events: none; transition: opacity .2s; }
   #toast.on { opacity: 1; }
@@ -105,6 +106,7 @@
       <input type="checkbox" id="audio" checked> Áudio do PC
     </label>
     <span id="upl"></span>
+    <button id="camBtn" title="Liga sua câmera pros amigos (sem som: a voz continua no Discord)">📷 Câmera</button>
     <button id="share" class="primary">🖥️ Compartilhar tela</button>
     <button id="logBtn" title="Mostra o log de conexão. Se der problema, cada um copia o seu e manda.">📋 Log</button>
     <button id="leave" title="Sair da sala">Sair</button>
@@ -137,7 +139,7 @@ const $ = s => document.querySelector(s);
 const PREFIX = 'telinha-v2-';
 const MAX_SLOTS = 12;
 const esc = s => String(s).replace(/[&<>"']/g, c => '&#' + c.charCodeAt(0) + ';');
-const VERSION = 8; // sobe a cada atualização; quem estiver com versão menor aparece com ⚠️
+const VERSION = 9; // sobe a cada atualização; quem estiver com versão menor aparece com ⚠️
 const slotId = n => PREFIX + S.room + '-p' + n;
 const slotOf = id => +(/-p(\d+)$/.exec(id)?.[1] || 0);
 
@@ -160,7 +162,9 @@ const S = {
   peers: new Map(),   // id -> { id, name, sharing, conn, inCall, failed, seen }
   screen: null, quality: QUALITY.jogo720,
   out: new Map(),     // id -> chamada saindo com a minha tela
-  tiles: new Map(),   // id ('me' pra mim) -> { el, video }
+  cam: null,          // minha câmera (stream), se ligada
+  outCam: new Map(),  // id -> chamada saindo com a minha câmera
+  tiles: new Map(),   // id ('me' pra mim; 'x|cam' pra câmera) -> { el, video }
   log: [],
   left: false,
 };
@@ -373,7 +377,7 @@ function setupConn(c) {
     const q = S.peers.get(id);
     if (q?.conn !== c) { try { c.close(); } catch {} return; }
     q.seen = true; q.lostAt = 0;
-    c.send({ t: 'hello', v: VERSION, name: S.name, sharing: !!S.screen });
+    c.send({ t: 'hello', v: VERSION, name: S.name, sharing: !!S.screen, cam: !!S.cam });
     if (S.screen && !alive(S.out.get(id))) callScreen(id);
     renderPeople(); updateUpload();
   });
@@ -394,7 +398,7 @@ function setupConn(c) {
 
 // Dados e vídeo são conexões separadas. Se só a de dados cair, o vídeo continua e a gente reconecta os dados por trás.
 function alive(call) { const s = call?.peerConnection?.connectionState; return s === 'connected' || s === 'connecting' || s === 'new'; }
-function videoAlive(p) { return alive(p.inCall) || alive(S.out.get(p.id)); }
+function videoAlive(p) { return alive(p.inCall) || alive(S.out.get(p.id)) || alive(p.camIn) || alive(S.outCam.get(p.id)); }
 
 function connLost(id) {
   const p = S.peers.get(id);
@@ -421,11 +425,16 @@ function onPeerData(id, d) {
   if (d.t === 'hello') {
     p.name = String(d.name || '?').slice(0, 24); p.sharing = !!d.sharing;
     log('conectado com', p.name);
+    p.v = +d.v || 0; p.cam = !!d.cam;
     p.old = !(d.v >= VERSION);
     if (p.old) log(p.name, 'está com uma versão antiga do Telinha');
+    // Câmera só pra quem tem v9+ (versão antiga confundiria a câmera com a tela).
+    if (S.cam && p.v >= 9 && !alive(S.outCam.get(id))) callCam(id);
   }
   else if (d.t === 'sharing') { p.sharing = !!d.on; if (!d.on) closeIn(id); }
+  else if (d.t === 'cam') { p.cam = !!d.on; if (!d.on) closeCamIn(id); }
   else if (d.t === 'bye') { log(who(id), 'saiu da sala'); dropPeer(id); return; }
+  else if (d.t === 'want' && d.kind === 'cam') { log(who(id), 'pediu a câmera de novo'); if (S.cam) callCam(id); return; }
   else if (d.t === 'want') { log(who(id), 'pediu o vídeo de novo'); if (S.screen) callScreen(id); return; }
   renderPeople(); updateTileLabel(id);
 }
@@ -433,8 +442,9 @@ function onPeerData(id, d) {
 function dropPeer(id) {
   const p = S.peers.get(id);
   if (!p) return;
-  closeIn(id);
+  closeIn(id); closeCamIn(id);
   const o = S.out.get(id); if (o) { S.out.delete(id); try { o.close(); } catch {} }
+  const oc = S.outCam.get(id); if (oc) { S.outCam.delete(id); try { oc.close(); } catch {} }
   S.peers.delete(id);
   try { p.conn?.close(); } catch {}
   renderPeople(); updateUpload();
@@ -442,6 +452,7 @@ function dropPeer(id) {
 
 /* ---------- Vídeo ---------- */
 function onCall(call) {
+  if (call.metadata?.kind === 'cam') return onCamCall(call);
   const id = call.peer, p = peerRec(id);
   if (p.inCall && p.inCall !== call) try { p.inCall.close(); } catch {}
   p.inCall = call;
@@ -458,6 +469,86 @@ function closeIn(id) {
   const p = S.peers.get(id);
   if (p?.inCall) { const c = p.inCall; p.inCall = null; try { c.close(); } catch {} }
   removeTile(id);
+}
+
+/* ---------- Câmera (separada da tela: cada uma tem sua própria conexão de vídeo) ---------- */
+const CAM = { w: 640, h: 360, fps: 30, br: 700_000 };
+
+function onCamCall(call) {
+  const id = call.peer, p = peerRec(id);
+  if (p.camIn && p.camIn !== call) try { p.camIn.close(); } catch {}
+  p.camIn = call;
+  call.answer();
+  log('recebendo câmera de', who(id));
+  call.on('stream', s => { if (p.camIn === call) { p.cam = true; addTile(id + '|cam', s, false); renderPeople(); } });
+  call.on('close', () => { if (p.camIn === call) { log('câmera de', who(id), 'fechou'); p.camIn = null; removeTile(id + '|cam'); } });
+  call.on('error', e => log('erro câmera de', who(id), e.type));
+  watchPc(call.peerConnection, 'câmera de ' + who(id), () => { if (p.camIn === call) closeCamIn(id); });
+}
+
+function closeCamIn(id) {
+  const p = S.peers.get(id);
+  if (p?.camIn) { const c = p.camIn; p.camIn = null; try { c.close(); } catch {} }
+  removeTile(id + '|cam');
+}
+
+async function startCam() {
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: CAM.w }, height: { ideal: CAM.h }, frameRate: { ideal: CAM.fps, max: CAM.fps } },
+      audio: false,
+    });
+  } catch (e) {
+    if (e.name === 'NotAllowedError') toast('Câmera bloqueada. Clica no 🔒/📷 do lado do endereço e libera a câmera.', 6000);
+    else if (e.name === 'NotFoundError') toast('Nenhuma câmera encontrada.');
+    else if (e.name === 'NotReadableError') toast('A câmera está sendo usada por outro programa (Discord, OBS…). Fecha lá e tenta de novo.', 6000);
+    else toast('Não deu pra abrir a câmera: ' + e.message);
+    return;
+  }
+  const v = stream.getVideoTracks()[0];
+  try { v.contentHint = 'motion'; } catch {}
+  v.addEventListener('ended', stopCam); // câmera desconectada
+  S.cam = stream;
+  log('câmera ligada');
+  addTile('me|cam', stream, true);
+  for (const p of S.peers.values()) if (p.conn?.open) {
+    p.conn.send({ t: 'cam', on: true });
+    if (p.v >= 9) callCam(p.id);
+  }
+  updateCamBtn(); renderPeople(); updateUpload();
+}
+
+function callCam(id) {
+  if (!S.cam || !S.me) return;
+  const old = S.outCam.get(id); if (old) try { old.close(); } catch {}
+  const call = S.me.call(id, S.cam, { metadata: { kind: 'cam' } });
+  if (!call) return;
+  S.outCam.set(id, call);
+  call.on('close', () => { if (S.outCam.get(id) === call) S.outCam.delete(id); });
+  call.on('error', e => log('erro enviando câmera pra', who(id), e.type));
+  const pc = call.peerConnection;
+  if (pc) pc.addEventListener('connectionstatechange', () => { if (pc.connectionState === 'connected') setBitrate(pc, CAM.br, CAM.fps); });
+  watchPc(pc, 'minha câmera pra ' + who(id), () => { if (S.outCam.get(id) === call) { S.outCam.delete(id); try { call.close(); } catch {} } });
+  updateUpload();
+}
+
+function stopCam() {
+  if (!S.cam) return;
+  S.cam.getTracks().forEach(t => t.stop());
+  S.cam = null;
+  for (const c of S.outCam.values()) try { c.close(); } catch {}
+  S.outCam.clear();
+  for (const p of S.peers.values()) if (p.conn?.open) try { p.conn.send({ t: 'cam', on: false }); } catch {}
+  removeTile('me|cam');
+  log('câmera desligada');
+  updateCamBtn(); renderPeople(); updateUpload();
+}
+
+function updateCamBtn() {
+  const b = $('#camBtn');
+  b.textContent = S.cam ? '📷 Desligar câmera' : '📷 Câmera';
+  b.classList.toggle('on', !!S.cam);
 }
 
 async function startShare() {
@@ -521,16 +612,26 @@ setInterval(() => {
       try { p.conn.send({ t: 'want' }); } catch {}
     }
   }
+  // Mesma coisa pra câmera.
+  for (const p of S.peers.values()) {
+    if (!p.conn?.open || !p.cam || S.tiles.has(p.id + '|cam')) { p.noCamSince = 0; continue; }
+    if (!p.noCamSince) p.noCamSince = now;
+    if (now - p.noCamSince > 4000 && now - (p.lastWantCam || 0) > 8000) {
+      p.lastWantCam = now;
+      log('sem câmera de', p.name, '— pedindo de novo');
+      try { p.conn.send({ t: 'want', kind: 'cam' }); } catch {}
+    }
+  }
 }, 2000);
 
-function setBitrate(pc) {
+function setBitrate(pc, br = S.quality.br, fps = S.quality.fps) {
   if (!pc) return;
   for (const s of pc.getSenders()) {
     if (s.track?.kind !== 'video') continue;
     const p = s.getParameters();
     if (!p.encodings || !p.encodings.length) p.encodings = [{}];
-    p.encodings[0].maxBitrate = S.quality.br;
-    p.encodings[0].maxFramerate = S.quality.fps;
+    p.encodings[0].maxBitrate = br;
+    p.encodings[0].maxFramerate = fps;
     s.setParameters(p).catch(e => console.warn('[bitrate]', e.message));
   }
 }
@@ -551,13 +652,13 @@ function addTile(id, stream, isMe) {
   let t = S.tiles.get(id);
   if (!t) {
     const el = document.createElement('div');
-    el.className = 'tile';
+    el.className = 'tile' + (id === 'me|cam' ? ' mecam' : '');
     el.innerHTML = '<video autoplay playsinline></video><div class="black"></div><div class="bar"><span class="who"></span><span class="sp"></span>'
       + (isMe ? '' : '<button class="mute" title="Ligar/desligar som">🔊</button><input class="vol" type="range" min="0" max="1" step="0.05" value="1" title="Volume">')
       + '<button class="fs" title="Tela cheia">⛶</button></div>';
     const video = el.querySelector('video');
     video.muted = isMe;
-    t = { el, video, isMe, dark: 0 };
+    t = { el, video, isMe, cam: id.endsWith('|cam'), dark: 0 };
     // Mouse parado 2s em cima do vídeo: esconde o mouse e a barra.
     const wake = () => {
       el.classList.remove('idle'); clearTimeout(t.idleT);
@@ -575,7 +676,10 @@ function addTile(id, stream, isMe) {
       vol.addEventListener('input', () => { video.volume = +vol.value; if (video.muted && +vol.value > 0) { video.muted = false; t.updMute(); } });
     }
     S.tiles.set(id, t);
-    if (isMe) $('#grid').prepend(el); else $('#grid').appendChild(el);
+    // Câmera fica do lado da tela da mesma pessoa.
+    const base = id.replace(/\|cam$/, ''), sib = S.tiles.get(t.cam ? base : base + '|cam');
+    if (sib) { if (t.cam) sib.el.after(el); else sib.el.before(el); }
+    else if (isMe) $('#grid').prepend(el); else $('#grid').appendChild(el);
   }
   if (t.video.srcObject !== stream) {
     t.video.srcObject = stream;
@@ -596,8 +700,12 @@ function removeTile(id) {
 }
 
 function updateTileLabel(id) {
-  const t = S.tiles.get(id);
-  if (t) t.el.querySelector('.who').textContent = id === 'me' ? 'Você' : (S.peers.get(id)?.name || '?');
+  for (const k of [id.replace(/\|cam$/, ''), id.replace(/\|cam$/, '') + '|cam']) {
+    const t = S.tiles.get(k);
+    if (!t) continue;
+    const base = k.replace(/\|cam$/, '');
+    t.el.querySelector('.who').textContent = (base === 'me' ? 'Você' : (S.peers.get(base)?.name || '?')) + (t.cam ? ' · câmera' : '');
+  }
 }
 
 function fullscreen(el) {
@@ -623,6 +731,7 @@ function isBlackFrame(video) {
 }
 setInterval(() => {
   for (const [id, t] of S.tiles) {
+    if (t.cam) continue; // câmera tampada/escura não é problema de jogo
     const b = isBlackFrame(t.video);
     if (b === null) continue;
     t.dark = b ? t.dark + 1 : 0;
@@ -646,7 +755,7 @@ function renderPeople() {
     s.className = 'pill ' + cls; s.textContent = text; if (title) s.title = title;
     box.appendChild(s);
   };
-  add(S.name + ' (você)' + (S.screen ? ' · 🔴 ao vivo' : ''), 'ok');
+  add(S.name + ' (você)' + (S.screen ? ' · 🔴 ao vivo' : '') + (S.cam ? ' · 📷' : ''), 'ok');
   let n = 1;
   for (const p of S.peers.values()) {
     if (!p.seen) continue; // lugares vazios/travados não aparecem
@@ -655,7 +764,7 @@ function renderPeople() {
     let title = st === 'bad' ? 'Não conseguiu conectar direto com essa pessoa (rede/NAT). Ver TURN no código.'
       : st === 'wait' ? (videoAlive(p) ? 'Reconectando (o vídeo continua)…' : 'Conectando…') : '';
     if (p.old) title = 'Essa pessoa está com uma versão antiga do Telinha: pede pra ela atualizar o arquivo/página. ' + title;
-    add(p.name + (p.sharing ? ' · 🔴 ao vivo' : '') + (p.old ? ' · ⚠️ versão antiga' : ''), st, title);
+    add(p.name + (p.sharing ? ' · 🔴 ao vivo' : '') + (p.cam ? ' · 📷' : '') + (p.old ? ' · ⚠️ versão antiga' : ''), st, title);
   }
   $('#count').textContent = n;
 }
@@ -669,14 +778,17 @@ function updateShareBtn() {
 function updateUpload() {
   const viewers = [...S.peers.values()].filter(p => p.conn?.open).length;
   const mbps = S.quality.br / 1e6;
-  $('#upl').textContent = S.screen
-    ? `upload ≈ ${(mbps * Math.max(1, viewers)).toFixed(1)} Mb/s`
+  const sending = (S.screen ? mbps : 0) + (S.cam ? CAM.br / 1e6 : 0);
+  $('#upl').textContent = sending
+    ? `upload ≈ ${(sending * Math.max(1, viewers)).toFixed(1)} Mb/s`
     : `≈ ${mbps.toFixed(1)} Mb/s por amigo`;
-  $('#upl').title = 'Cada amigo assistindo recebe uma cópia da sua tela, então o upload soma.';
+  $('#upl').title = 'Cada amigo assistindo recebe uma cópia da sua tela (e da câmera), então o upload soma.';
 }
 
 /* ---------- Controles ---------- */
 $('#share').addEventListener('click', () => S.screen ? stopShare() : startShare());
+$('#camBtn').addEventListener('click', () => S.cam ? stopCam() : startCam());
+if (!navigator.mediaDevices?.getUserMedia) { $('#camBtn').disabled = true; $('#camBtn').title = 'Seu navegador não deixa usar a câmera aqui.'; }
 
 $('#quality').addEventListener('change', () => {
   const k = $('#quality').value;
@@ -715,7 +827,7 @@ $('#logClose').addEventListener('click', () => { $('#logPanel').hidden = true; $
 $('#logCopy').addEventListener('click', async () => {
   const peers = [...S.peers.values()].filter(p => p.seen).map(p => `  ${p.name}: ${p.conn?.open ? 'conectado' : 'sem conexão'}${p.sharing ? ', transmitindo' : ''}${S.tiles.has(p.id) ? ', vídeo chegando' : ''}`);
   const txt = [`Telinha v${VERSION} · sala #${S.room} · ${S.name} (lugar ${S.slot}) · ${new Date().toLocaleString('pt-BR')}`,
-    `transmitindo: ${S.screen ? 'sim (' + S.quality.label + ')' : 'não'}`, 'pessoas:', ...peers, '', ...S.log].join('\n');
+    `transmitindo: ${S.screen ? 'sim (' + S.quality.label + ')' : 'não'} · câmera: ${S.cam ? 'ligada' : 'desligada'}`, 'pessoas:', ...peers, '', ...S.log].join('\n');
   try { await navigator.clipboard.writeText(txt); toast('Log copiado!'); } catch { prompt('Copia aí:', txt); }
 });
 
@@ -729,6 +841,7 @@ function shutdown() {
   sayBye();
   S.left = true;
   try { stopShare(); } catch {}
+  try { stopCam(); } catch {}
   try { S.me?.destroy(); } catch {}
 }
 $('#leave').addEventListener('click', () => {
