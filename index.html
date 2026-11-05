@@ -62,6 +62,12 @@
   .tile .bar button { padding: 3px 8px; background: rgba(0,0,0,.5); }
   .tile .vol { width: 90px; accent-color: var(--accent); }
   .tile:fullscreen { border-radius: 0; max-height: none; }
+  /* mouse parado em cima do vídeo some (senão fica parecendo 2 mouses) */
+  .tile.idle, .tile.idle video { cursor: none; }
+  .tile.idle .bar { opacity: 0; }
+  .tile .black { position: absolute; inset: 0; display: none; place-items: center; text-align: center; padding: 20px; color: #f3d58a; font-size: 14px; line-height: 1.5; pointer-events: none; }
+  .tile .black b { color: #fff; font-size: 16px; }
+  .tile.isblack .black { display: grid; }
 
   #logPanel { display: flex; flex-direction: column; height: 32vh; min-height: 150px; background: var(--panel); border-top: 1px solid var(--line); }
   #logPanel[hidden] { display: none; }
@@ -130,7 +136,8 @@ const $ = s => document.querySelector(s);
 // quem chega tenta conectar em todos os lugares, e um lugar travado não atrapalha os outros.
 const PREFIX = 'telinha-v2-';
 const MAX_SLOTS = 12;
-const VERSION = 7; // sobe a cada atualização; quem estiver com versão menor aparece com ⚠️
+const esc = s => String(s).replace(/[&<>"']/g, c => '&#' + c.charCodeAt(0) + ';');
+const VERSION = 8; // sobe a cada atualização; quem estiver com versão menor aparece com ⚠️
 const slotId = n => PREFIX + S.room + '-p' + n;
 const slotOf = id => +(/-p(\d+)$/.exec(id)?.[1] || 0);
 
@@ -545,12 +552,19 @@ function addTile(id, stream, isMe) {
   if (!t) {
     const el = document.createElement('div');
     el.className = 'tile';
-    el.innerHTML = '<video autoplay playsinline></video><div class="bar"><span class="who"></span><span class="sp"></span>'
+    el.innerHTML = '<video autoplay playsinline></video><div class="black"></div><div class="bar"><span class="who"></span><span class="sp"></span>'
       + (isMe ? '' : '<button class="mute" title="Ligar/desligar som">🔊</button><input class="vol" type="range" min="0" max="1" step="0.05" value="1" title="Volume">')
       + '<button class="fs" title="Tela cheia">⛶</button></div>';
     const video = el.querySelector('video');
     video.muted = isMe;
-    t = { el, video };
+    t = { el, video, isMe, dark: 0 };
+    // Mouse parado 2s em cima do vídeo: esconde o mouse e a barra.
+    const wake = () => {
+      el.classList.remove('idle'); clearTimeout(t.idleT);
+      t.idleT = setTimeout(() => { if (!el.querySelector('.bar:focus-within')) el.classList.add('idle'); }, 2000);
+    };
+    el.addEventListener('mousemove', wake);
+    el.addEventListener('mouseleave', () => { clearTimeout(t.idleT); el.classList.remove('idle'); });
     video.addEventListener('click', () => el.classList.toggle('focus'));
     video.addEventListener('dblclick', () => fullscreen(el));
     el.querySelector('.fs').addEventListener('click', () => fullscreen(el));
@@ -592,6 +606,38 @@ function fullscreen(el) {
 }
 
 function refreshEmpty() { $('#empty').hidden = S.tiles.size > 0; }
+
+/* Tela preta: jogo em tela cheia exclusiva não deixa o navegador capturar (só sai o mouse).
+   A cada 2s olha uma miniatura do vídeo; 6s quase tudo preto = mostra o aviso no vídeo. */
+const blackCv = document.createElement('canvas'); blackCv.width = 32; blackCv.height = 18;
+const blackCx = blackCv.getContext('2d', { willReadFrequently: true });
+function isBlackFrame(video) {
+  if (!video.videoWidth || video.readyState < 2) return null;
+  try {
+    blackCx.drawImage(video, 0, 0, 32, 18);
+    const d = blackCx.getImageData(0, 0, 32, 18).data;
+    let dark = 0;
+    for (let i = 0; i < d.length; i += 4) if (d[i] + d[i + 1] + d[i + 2] < 45) dark++;
+    return dark / (d.length / 4) >= 0.97; // sobra espaço pro mouse desenhado em cima do preto
+  } catch { return null; }
+}
+setInterval(() => {
+  for (const [id, t] of S.tiles) {
+    const b = isBlackFrame(t.video);
+    if (b === null) continue;
+    t.dark = b ? t.dark + 1 : 0;
+    const on = t.dark >= 3;
+    if (on === t.el.classList.contains('isblack')) continue;
+    t.el.classList.toggle('isblack', on);
+    const name = S.peers.get(id)?.name || '?';
+    if (on) {
+      t.el.querySelector('.black').innerHTML = t.isMe
+        ? '<div><b>Sua tela está saindo preta pros amigos</b><br>Jogo em tela cheia não deixa o navegador capturar.<br>No jogo, muda o modo de vídeo pra <b>Janela sem bordas</b> (Borderless),<br>ou para e compartilha a <b>Tela inteira</b> em vez da janela.</div>'
+        : '<div><b>A tela de ' + esc(name) + ' está chegando preta</b><br>Se for jogo, pede pra colocar em <b>Janela sem bordas</b> (Borderless)<br>ou compartilhar a <b>Tela inteira</b> em vez da janela.</div>';
+      log(t.isMe ? 'minha transmissão está saindo preta (jogo em tela cheia?)' : 'vídeo de ' + name + ' chegando preto');
+    } else log(t.isMe ? 'minha transmissão voltou a ter imagem' : 'vídeo de ' + name + ' voltou a ter imagem');
+  }
+}, 2000);
 
 function renderPeople() {
   const box = $('#people'); box.textContent = '';
