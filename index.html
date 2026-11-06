@@ -215,6 +215,17 @@
   .ib.pinned .ic { fill: currentColor; }
   .room #pinRoom { margin-left: 2px; }
 
+  .switch small b { color: var(--text); font-weight: 600; }
+
+  /* Cartão de quem está ao vivo e você não está assistindo */
+  .live-card { aspect-ratio: 16 / 9; max-width: 100%; max-height: calc(100vh - 190px); display: grid; place-content: center; justify-items: center; gap: 14px;
+               border-radius: var(--r-md); border: 1px dashed color-mix(in srgb, var(--onair) 45%, var(--line));
+               background: radial-gradient(60% 60% at 50% 40%, color-mix(in srgb, var(--onair) 9%, var(--surface)), var(--surface)); }
+  .live-card .av { width: 64px; height: 64px; border-radius: 50%; display: grid; place-items: center; font-size: 26px; font-weight: 750;
+                   background: hsl(var(--h) 38% 30%); color: hsl(var(--h) 85% 86%); box-shadow: 0 0 0 3px var(--surface), 0 0 0 5px var(--onair); }
+  .live-card .lc-name { display: flex; align-items: center; gap: 8px; font-size: 16px; }
+  .live-card .lc-name b { font-weight: 650; max-width: 20ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
   #upl { font-size: 12.5px; color: var(--muted); padding-top: 12px; border-top: 1px solid var(--line); }
 
   #toast { position: fixed; left: 50%; bottom: 96px; transform: translateX(-50%); background: var(--surface-3); border: 1px solid var(--line);
@@ -254,6 +265,8 @@
   <symbol id="i-full" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/></symbol>
   <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
   <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M9.9 5.2A10.4 10.4 0 0 1 12 5c6.5 0 10 7 10 7a17 17 0 0 1-2.2 3.2M6.6 6.6C3.9 8.3 2 12 2 12s3.5 7 10 7a9.7 9.7 0 0 0 5.4-1.6M9.9 9.9a3 3 0 0 0 4.2 4.2M2 2l20 20"/></symbol>
   <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3l-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z"/></symbol>
 </svg>
 
@@ -338,6 +351,11 @@
         </div>
         <small class="help" id="audioHelp"></small>
       </div>
+      <h3>Assistir</h3>
+      <label class="switch">Abrir a tela de quem começar a transmitir
+        <input type="checkbox" id="autoWatch" checked>
+        <small>Desligado, aparece um cartão com o botão <b>Assistir</b> e o vídeo só vem quando você clicar. Pra parar de ver alguém, passa o mouse na tela e clica no olho riscado.</small>
+      </label>
       <div id="upl" class="mono"></div>
     </div>
   </footer>
@@ -356,7 +374,7 @@ const MAX_SLOTS = 12;
 const esc = s => String(s).replace(/[&<>"']/g, c => '&#' + c.charCodeAt(0) + ';');
 // Ícone SVG do sprite lá de cima.
 const icon = (id, cls = 'ic') => `<svg class="${cls}" aria-hidden="true"><use href="#${id}"/></svg>`;
-const VERSION = 12; // sobe a cada atualização; quem estiver com versão menor aparece com ⚠️
+const VERSION = 13; // sobe a cada atualização; quem estiver com versão menor aparece com ⚠️
 const slotId = n => PREFIX + S.room + '-p' + n;
 const slotOf = id => +(/-p(\d+)$/.exec(id)?.[1] || 0);
 
@@ -381,6 +399,7 @@ const S = {
   out: new Map(),     // id -> chamada saindo com a minha tela
   cam: null,          // minha câmera (stream), se ligada
   outCam: new Map(),  // id -> chamada saindo com a minha câmera
+  noWatch: new Set(), // ids que escolheram não assistir a minha tela
   tiles: new Map(),   // id ('me' pra mim; 'x|cam' pra câmera) -> { el, video }
   log: [],
   left: false,
@@ -525,6 +544,11 @@ $('#pinRoom').addEventListener('click', () => {
   toast(on ? 'Sala fixada na lista do início.' : 'Sala desafixada.');
 });
 renderRooms();
+$('#autoWatch').checked = autoWatch();
+$('#autoWatch').addEventListener('change', () => {
+  store.set('telinha.autoWatch', $('#autoWatch').checked ? '1' : '0');
+  toast($('#autoWatch').checked ? 'Telas novas vão abrir sozinhas.' : 'Telas novas vão aparecer como cartão com o botão Assistir.');
+});
 (!$('#name').value ? $('#name') : $('#room')).focus();
 
 $('#joinForm').addEventListener('submit', e => { e.preventDefault(); join(); });
@@ -607,15 +631,18 @@ function startPeer() {
   });
 }
 
-// Tenta conectar nos outros lugares. Quem acabou de chegar procura todo mundo;
-// depois disso, a cada 8s, o lugar menor procura os maiores (pra achar quem chegar).
-function probeAll(initial) {
+// Tenta conectar nos outros lugares. Quem acabou de chegar procura todo mundo (e assim todo mundo acha quem chega).
+// Depois disso o lugar menor só reconecta quem já conhece; lugar vazio é sondado de vez em quando e só perto dos ocupados.
+// (Cada sondagem cria uma conexão WebRTC; sondar 11 lugares a cada 8s estourava o limite do Chrome em sessões longas.)
+function probeAll(initial, sweep) {
   if (!S.me || S.me.disconnected || S.left) return;
+  let top = S.slot;
+  for (const p of S.peers.values()) if (p.seen) top = Math.max(top, slotOf(p.id));
   for (let n = 1; n <= MAX_SLOTS; n++) {
     if (n === S.slot) continue;
-    const id = slotId(n);
-    if (S.peers.get(id)?.conn) continue; // já conectado ou tentando
-    if (initial || S.slot < n) linkPeer(id);
+    const id = slotId(n), p = S.peers.get(id);
+    if (p?.conn) continue; // já conectado ou tentando
+    if (initial || (S.slot < n && (p?.seen || (sweep && n <= top + 2)))) linkPeer(id);
   }
 }
 
@@ -649,7 +676,7 @@ function onMeError(e) {
 /* ---------- Conexões diretas entre os amigos ---------- */
 function peerRec(id) {
   let p = S.peers.get(id);
-  if (!p) { p = { id, name: '…', sharing: false, conn: null, inCall: null, failed: false, seen: false }; S.peers.set(id, p); }
+  if (!p) { p = { id, name: '…', sharing: false, conn: null, inCall: null, failed: false, seen: false, watch: autoWatch(), watchSet: false }; S.peers.set(id, p); }
   return p;
 }
 
@@ -687,7 +714,8 @@ function setupConn(c) {
     const q = S.peers.get(id);
     if (q?.conn !== c) { try { c.close(); } catch {} return; }
     q.seen = true; q.lostAt = 0;
-    c.send({ t: 'hello', v: VERSION, name: S.name, sharing: !!S.screen, cam: !!S.cam });
+    // watch: se eu quero ver a tela dessa pessoa (quem transmite não manda vídeo pra quem não quer).
+    c.send({ t: 'hello', v: VERSION, name: S.name, sharing: !!S.screen, cam: !!S.cam, watch: q.watch });
     if (S.screen && !alive(S.out.get(id))) callScreen(id);
     renderPeople(); updateUpload();
   });
@@ -740,14 +768,73 @@ function onPeerData(id, d) {
     if (p.old) log(p.name, 'está com uma versão antiga do Telinha');
     // Câmera só pra quem tem v9+ (versão antiga confundiria a câmera com a tela).
     if (S.cam && p.v >= 9 && !alive(S.outCam.get(id))) callCam(id);
+    if (d.watch === false) noWatchFrom(id); else if (d.watch === true) S.noWatch.delete(id);
   }
-  else if (d.t === 'sharing') { p.sharing = !!d.on; if (!d.on) closeIn(id); }
+  else if (d.t === 'sharing') {
+    if (d.on && !p.watchSet) p.watch = autoWatch(); // começou agora: segue o "assistir automaticamente"
+    p.sharing = !!d.on;
+    if (!d.on) closeIn(id);
+    else if (!p.watch && p.inCall) { closeIn(id); try { p.conn?.send({ t: 'watch', on: false }); } catch {} } // vídeo chegou antes do aviso
+  }
+  else if (d.t === 'watch' && d.on === false) { noWatchFrom(id); return; }
   else if (d.t === 'cam') { p.cam = !!d.on; if (!d.on) closeCamIn(id); }
   else if (d.t === 'bye') { log(who(id), 'saiu da sala'); dropPeer(id); return; }
   else if (d.t === 'want' && d.kind === 'cam') { log(who(id), 'pediu a câmera de novo'); if (S.cam) callCam(id); return; }
-  else if (d.t === 'want') { log(who(id), 'pediu o vídeo de novo'); if (S.screen) callScreen(id); return; }
+  else if (d.t === 'want') {
+    log(who(id), S.noWatch.has(id) ? 'voltou a assistir sua tela' : 'pediu o vídeo de novo');
+    S.noWatch.delete(id);
+    if (S.screen) callScreen(id);
+    updateUpload(); return;
+  }
   renderPeople(); updateTileLabel(id);
 }
+
+// Quem assiste escolheu não ver minha tela: para de mandar (economiza o upload).
+function noWatchFrom(id) {
+  if (!S.noWatch.has(id) && S.screen) log(who(id), 'não está assistindo sua tela');
+  S.noWatch.add(id);
+  const o = S.out.get(id); if (o) { S.out.delete(id); try { o.close(); } catch {} }
+  updateUpload();
+}
+
+/* Assistir ou não a tela de alguém (igual ao "Assistir transmissão" do Discord). */
+function autoWatch() { return store.get('telinha.autoWatch') !== '0'; }
+function startWatching(id) {
+  const p = S.peers.get(id); if (!p) return;
+  p.watch = true; p.watchSet = true; p.noVideoSince = 0; p.lastWant = Date.now();
+  log('assistindo a tela de', who(id));
+  try { p.conn?.send({ t: 'want' }); } catch {}
+  renderPeople();
+}
+function stopWatching(id) {
+  const p = S.peers.get(id); if (!p) return;
+  p.watch = false; p.watchSet = true;
+  log('parei de assistir a tela de', who(id));
+  closeIn(id);
+  try { p.conn?.send({ t: 'watch', on: false }); } catch {}
+  renderPeople();
+}
+// Cartão "Fulano está ao vivo · Assistir" pra quem transmite e eu não estou vendo.
+function renderCards() {
+  const want = new Set([...S.peers.values()].filter(p => p.seen && p.sharing && !p.watch && !S.tiles.has(p.id)).map(p => p.id));
+  for (const el of document.querySelectorAll('#grid .live-card')) if (!want.has(el.dataset.id)) el.remove();
+  for (const id of want) {
+    const p = S.peers.get(id);
+    let el = document.querySelector(`#grid .live-card[data-id="${CSS.escape(id)}"]`);
+    if (!el) {
+      el = document.createElement('div'); el.className = 'live-card'; el.dataset.id = id;
+      el.innerHTML = '<span class="av"></span><div class="lc-name"><b></b><span class="onair">ao vivo</span></div>'
+        + '<button class="btn primary" type="button">' + icon('i-eye') + 'Assistir</button>';
+      el.querySelector('button').addEventListener('click', () => startWatching(id));
+      $('#grid').appendChild(el);
+    }
+    el.querySelector('.av').textContent = (p.name.trim()[0] || '?').toUpperCase();
+    el.querySelector('.av').style.setProperty('--h', nameHue(p.name));
+    el.querySelector('b').textContent = p.name;
+  }
+  refreshEmpty();
+}
+const nameHue = name => [...name].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) % 360, 7);
 
 function dropPeer(id) {
   const p = S.peers.get(id);
@@ -755,6 +842,7 @@ function dropPeer(id) {
   closeIn(id); closeCamIn(id);
   const o = S.out.get(id); if (o) { S.out.delete(id); try { o.close(); } catch {} }
   const oc = S.outCam.get(id); if (oc) { S.outCam.delete(id); try { oc.close(); } catch {} }
+  S.noWatch.delete(id);
   S.peers.delete(id);
   try { p.conn?.close(); } catch {}
   renderPeople(); updateUpload();
@@ -764,6 +852,11 @@ function dropPeer(id) {
 function onCall(call) {
   if (call.metadata?.kind === 'cam') return onCamCall(call);
   const id = call.peer, p = peerRec(id);
+  if (!p.watch) { // não estou assistindo essa pessoa: recusa e avisa (versão antiga manda mesmo assim)
+    try { call.close(); } catch {}
+    try { p.conn?.send({ t: 'watch', on: false }); } catch {}
+    return;
+  }
   if (p.inCall && p.inCall !== call) try { p.inCall.close(); } catch {}
   p.inCall = call;
   call.answer(); // só assiste, não manda nada de volta
@@ -897,6 +990,7 @@ async function startShare() {
 }
 
 function callScreen(id) {
+  if (S.noWatch.has(id)) return; // essa pessoa escolheu não assistir
   const old = S.out.get(id); if (old) try { old.close(); } catch {}
   const call = S.me.call(id, S.screen, { metadata: { kind: 'screen' } });
   if (!call) return;
@@ -918,7 +1012,8 @@ setInterval(() => {
   }
   if (S.me.disconnected) return;
   // A cada 8s: procura quem chegou / reconecta quem caiu (o lugar menor procura os maiores).
-  if (++S.tick % 4 === 0) probeAll(false);
+  // A cada 8s reconecta quem caiu; a cada 60s dá uma olhada nos lugares vazios logo acima (rede de segurança).
+  if (++S.tick % 4 === 0) probeAll(false, S.tick % 28 === 0);
   // Sumiu há 30s sem conexão nem vídeo? Tira da lista.
   for (const p of [...S.peers.values()]) {
     if (p.seen && !p.conn && p.lostAt && now - p.lostAt > 30000 && !videoAlive(p)) {
@@ -927,7 +1022,7 @@ setInterval(() => {
   }
   // Alguém está transmitindo mas o vídeo não chegou? Pede de novo.
   for (const p of S.peers.values()) {
-    if (!p.conn?.open || !p.sharing || S.tiles.has(p.id)) { p.noVideoSince = 0; continue; }
+    if (!p.conn?.open || !p.sharing || !p.watch || S.tiles.has(p.id)) { p.noVideoSince = 0; continue; }
     if (!p.noVideoSince) p.noVideoSince = now;
     if (now - p.noVideoSince > 4000 && now - (p.lastWant || 0) > 8000) {
       p.lastWant = now;
@@ -981,7 +1076,9 @@ function addTile(id, stream, isMe) {
       + '<div class="tag">' + (isCam ? icon('i-cam', 'ic sm') : '') + '<span class="who"></span></div>'
       + '<div class="bar">'
       + (isMe || isCam ? '' : '<button class="tb mute" title="Ligar/desligar som" aria-label="Ligar/desligar som">' + icon('i-vol') + '</button><input class="vol" type="range" min="0" max="1" step="0.05" value="1" title="Volume" aria-label="Volume">')
-      + '<span class="sp"></span><button class="tb fs" title="Tela cheia" aria-label="Tela cheia">' + icon('i-full') + '</button></div>';
+      + '<span class="sp"></span>'
+      + (isMe || isCam ? '' : '<button class="tb unwatch" title="Parar de assistir (economiza internet dos dois lados)" aria-label="Parar de assistir">' + icon('i-eye-off') + '</button>')
+      + '<button class="tb fs" title="Tela cheia" aria-label="Tela cheia">' + icon('i-full') + '</button></div>';
     const video = el.querySelector('video');
     video.muted = isMe;
     t = { el, video, isMe, cam: isCam, dark: 0 };
@@ -995,6 +1092,7 @@ function addTile(id, stream, isMe) {
     video.addEventListener('click', () => el.classList.toggle('focus'));
     video.addEventListener('dblclick', () => fullscreen(el));
     el.querySelector('.fs').addEventListener('click', () => fullscreen(el));
+    el.querySelector('.unwatch')?.addEventListener('click', () => { if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); stopWatching(id); });
     if (!isMe && !isCam) {
       const mute = el.querySelector('.mute'), vol = el.querySelector('.vol');
       t.updMute = () => { mute.querySelector('use').setAttribute('href', video.muted ? '#i-mute' : '#i-vol'); };
@@ -1039,7 +1137,7 @@ function fullscreen(el) {
   else el.requestFullscreen?.().catch(() => {});
 }
 
-function refreshEmpty() { $('#empty').hidden = S.tiles.size > 0; }
+function refreshEmpty() { $('#empty').hidden = S.tiles.size > 0 || !!document.querySelector('#grid .live-card'); }
 
 /* Tela preta: jogo em tela cheia exclusiva não deixa o navegador capturar (só sai o mouse).
    A cada 2s olha uma miniatura do vídeo; 6s quase tudo preto = mostra o aviso no vídeo. */
@@ -1103,6 +1201,7 @@ function renderPeople() {
     add(p.name, st, { live: p.sharing, cam: p.cam, old: p.old }, title);
   }
   $('#count').textContent = n;
+  renderCards();
 }
 
 function updateShareBtn() {
@@ -1113,11 +1212,12 @@ function updateShareBtn() {
 }
 
 function updateUpload() {
-  const viewers = [...S.peers.values()].filter(p => p.conn?.open).length;
+  const open = [...S.peers.values()].filter(p => p.conn?.open);
+  const screenViewers = open.filter(p => !S.noWatch.has(p.id)).length;
   const mbps = S.quality.br / 1e6;
-  const sending = (S.screen ? mbps : 0) + (S.cam ? CAM.br / 1e6 : 0);
-  $('#upl').textContent = sending
-    ? `upload ≈ ${(sending * Math.max(1, viewers)).toFixed(1)} Mb/s`
+  const total = (S.screen ? mbps * screenViewers : 0) + (S.cam ? CAM.br / 1e6 * open.length : 0);
+  $('#upl').textContent = S.screen || S.cam
+    ? `upload ≈ ${total.toFixed(1)} Mb/s` + (S.screen ? ` · ${screenViewers} assistindo` : '')
     : `≈ ${mbps.toFixed(1)} Mb/s por amigo`;
   $('#upl').title = 'Cada amigo assistindo recebe uma cópia da sua tela (e da câmera), então o upload soma.';
 }
