@@ -186,6 +186,35 @@
   .switch input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: var(--muted); transition: transform .15s, background .15s; }
   .switch input:checked { background: var(--lamp); border-color: var(--lamp); }
   .switch input:checked::after { transform: translateX(16px); background: var(--lamp-ink); }
+  .seg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px; padding: 3px; background: var(--bg); border: 1px solid var(--line); border-radius: var(--r-sm); }
+  .seg label { position: relative; cursor: pointer; }
+  .seg input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+  .seg span { display: grid; place-items: center; height: 34px; padding: 0 6px; border-radius: 6px; font-size: 13px; font-weight: 550; color: var(--muted); text-align: center; transition: background .12s, color .12s; }
+  .seg label:hover span { color: var(--text); }
+  .seg input:checked + span { background: var(--lamp); color: var(--lamp-ink); }
+  .seg input:focus-visible + span { outline: 2px solid var(--lamp); outline-offset: 2px; }
+  .help { color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+  .help b { color: var(--text); font-weight: 600; }
+
+  /* Salas salvas (lobby) e estrela de fixar */
+  #rooms { display: grid; gap: 9px; }
+  #rooms .lb { font: 500 11px/1 var(--font-mono); text-transform: uppercase; letter-spacing: .1em; color: var(--muted); }
+  #roomList { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+  .room-row { display: flex; align-items: center; gap: 2px; padding-right: 4px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-sm); transition: border-color .12s; }
+  .room-row:hover { border-color: color-mix(in srgb, var(--lamp) 45%, var(--line)); }
+  .room-go { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 10px; padding: 11px 12px; background: none; border: 0; border-radius: var(--r-sm); cursor: pointer; text-align: left; }
+  .room-go:focus-visible { outline: 2px solid var(--lamp); outline-offset: -2px; }
+  .room-go .rn { font: 600 15px/1.2 var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .room-go .rn::before { content: "#"; color: var(--muted); }
+  .room-go:hover .rn { color: var(--lamp); }
+  .room-go .when { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .ib { width: 32px; height: 32px; flex: none; display: grid; place-items: center; background: none; border: 0; border-radius: 7px; color: var(--muted); cursor: pointer; }
+  .ib:hover { background: var(--surface-2); color: var(--text); }
+  .ib:focus-visible { outline: 2px solid var(--lamp); outline-offset: 1px; }
+  .ib.pinned { color: var(--lamp); }
+  .ib.pinned .ic { fill: currentColor; }
+  .room #pinRoom { margin-left: 2px; }
+
   #upl { font-size: 12.5px; color: var(--muted); padding-top: 12px; border-top: 1px solid var(--line); }
 
   #toast { position: fixed; left: 50%; bottom: 96px; transform: translateX(-50%); background: var(--surface-3); border: 1px solid var(--line);
@@ -225,6 +254,7 @@
   <symbol id="i-full" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/></symbol>
   <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
   <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3l-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z"/></symbol>
 </svg>
 
 <div id="lobby">
@@ -245,6 +275,10 @@
       </label>
       <button class="btn primary" type="submit">Entrar na sala</button>
     </form>
+    <section id="rooms" hidden>
+      <span class="lb">Suas salas</span>
+      <ul id="roomList"></ul>
+    </section>
     <div class="lobby-foot">
       <button class="btn ghost install" type="button" hidden><svg class="ic"><use href="#i-download"/></svg>Instalar no PC</button>
       <span id="ver" class="mono"></span>
@@ -260,6 +294,7 @@
         <span class="room-name">#<span id="roomName"></span></span>
         <span class="room-count"><span id="count">1</span> na sala</span>
       </div>
+      <button class="ib" id="pinRoom" type="button" title="Fixar esta sala no topo da lista do início" aria-pressed="false" aria-label="Fixar sala"><svg class="ic"><use href="#i-star"/></svg></button>
     </div>
     <div id="people"></div>
     <div class="top-actions">
@@ -295,10 +330,14 @@
     <div id="settings" hidden>
       <h3>Transmissão</h3>
       <label class="field"><span class="lb">Qualidade</span><select id="quality"></select></label>
-      <label class="switch">Áudio do PC
-        <input type="checkbox" id="audio" checked>
-        <small>Manda o som do PC junto. Se for a tela inteira, a voz do Discord vai junto e os amigos ouvem eco. Compartilhar só uma aba evita isso.</small>
-      </label>
+      <div class="field" role="radiogroup" aria-labelledby="audioLb"><span class="lb" id="audioLb">Som da transmissão</span>
+        <div class="seg" id="audioMode">
+          <label><input type="radio" name="audioMode" id="am-window" value="window"><span>Só do jogo</span></label>
+          <label><input type="radio" name="audioMode" id="am-system" value="system"><span>PC todo</span></label>
+          <label><input type="radio" name="audioMode" id="am-none" value="none"><span>Sem som</span></label>
+        </div>
+        <small class="help" id="audioHelp"></small>
+      </div>
       <div id="upl" class="mono"></div>
     </div>
   </footer>
@@ -315,7 +354,9 @@ const $ = s => document.querySelector(s);
 const PREFIX = 'telinha-v2-';
 const MAX_SLOTS = 12;
 const esc = s => String(s).replace(/[&<>"']/g, c => '&#' + c.charCodeAt(0) + ';');
-const VERSION = 11; // sobe a cada atualização; quem estiver com versão menor aparece com ⚠️
+// Ícone SVG do sprite lá de cima.
+const icon = (id, cls = 'ic') => `<svg class="${cls}" aria-hidden="true"><use href="#${id}"/></svg>`;
+const VERSION = 12; // sobe a cada atualização; quem estiver com versão menor aparece com ⚠️
 const slotId = n => PREFIX + S.room + '-p' + n;
 const slotOf = id => +(/-p(\d+)$/.exec(id)?.[1] || 0);
 
@@ -403,7 +444,87 @@ $('#name').value = store.get('telinha.name') || '';
 $('#room').value = slug(decodeURIComponent(location.hash.slice(1))) || ('sala-' + Math.random().toString(36).slice(2, 7));
 for (const [k, q] of Object.entries(QUALITY)) $('#quality').add(new Option(q.label, k));
 const savedQ = store.get('telinha.quality'); if (QUALITY[savedQ]) { $('#quality').value = savedQ; S.quality = QUALITY[savedQ]; }
-const savedA = store.get('telinha.audio'); if (savedA !== null) $('#audio').checked = savedA === '1';
+// Som da transmissão. "Só do jogo" pede ao navegador só o som da janela escolhida (sem a voz do Discord).
+const AUDIO_HELP = {
+  window: 'Na hora de escolher, vai na aba <b>Janela</b> e escolhe o jogo. Só o som dele vai junto, sem a voz do Discord. Tela inteira vai sem som.',
+  system: 'Manda todo o som do PC, inclusive a voz do Discord. Os amigos ouvem as vozes duas vezes.',
+  none: 'Só a imagem, sem nenhum som.',
+};
+const audioMode = () => document.querySelector('input[name=audioMode]:checked')?.value || 'window';
+{
+  const old = store.get('telinha.audio'); // versão antiga guardava só ligado/desligado
+  const m = store.get('telinha.audioMode') || (old === '0' ? 'none' : 'window');
+  ($('#am-' + m) || $('#am-window')).checked = true;
+  $('#audioHelp').innerHTML = AUDIO_HELP[audioMode()];
+}
+$('#audioMode').addEventListener('change', () => {
+  store.set('telinha.audioMode', audioMode());
+  $('#audioHelp').innerHTML = AUDIO_HELP[audioMode()];
+  if (S.screen) toast('Vale na próxima vez que compartilhar.');
+});
+
+/* Salas salvas: toda sala que você entra fica na lista do início. A estrela fixa no topo. */
+const ROOMS_MAX = 8; // salas não fixadas guardadas
+function loadRooms() {
+  try { const l = JSON.parse(store.get('telinha.rooms') || '[]'); return Array.isArray(l) ? l.filter(r => r && typeof r.room === 'string' && slug(r.room) === r.room) : []; }
+  catch { return []; }
+}
+function saveRooms(list) {
+  list.sort((a, b) => (b.pinned - a.pinned) || (b.last - a.last));
+  let free = 0;
+  store.set('telinha.rooms', JSON.stringify(list.filter(r => r.pinned || ++free <= ROOMS_MAX)));
+}
+function touchRoom(room) {
+  const l = loadRooms(), r = l.find(x => x.room === room);
+  if (r) r.last = Date.now(); else l.push({ room, pinned: false, last: Date.now() });
+  saveRooms(l);
+}
+function setPinned(room, on) {
+  const l = loadRooms(), r = l.find(x => x.room === room);
+  if (r) r.pinned = on; else l.push({ room, pinned: on, last: Date.now() });
+  saveRooms(l); renderRooms(); updatePinBtn();
+}
+function forgetRoom(room) { saveRooms(loadRooms().filter(r => r.room !== room)); renderRooms(); }
+const rtf = new Intl.RelativeTimeFormat('pt-BR', { numeric: 'auto' });
+function ago(t) {
+  const s = (t - Date.now()) / 1000, a = Math.abs(s);
+  if (a < 60) return 'agora';
+  if (a < 3600) return rtf.format(Math.round(s / 60), 'minute');
+  if (a < 86400) return rtf.format(Math.round(s / 3600), 'hour');
+  return rtf.format(Math.round(s / 86400), 'day');
+}
+function renderRooms() {
+  const l = loadRooms().sort((a, b) => (b.pinned - a.pinned) || (b.last - a.last));
+  const ul = $('#roomList'); ul.textContent = '';
+  $('#rooms').hidden = !l.length;
+  for (const r of l) {
+    const li = document.createElement('li'); li.className = 'room-row';
+    li.innerHTML = `<button class="room-go" type="button" title="Entrar na sala"><span class="rn"></span><span class="when"></span></button>`
+      + `<button class="ib pin${r.pinned ? ' pinned' : ''}" type="button" aria-pressed="${r.pinned}" title="${r.pinned ? 'Desafixar' : 'Fixar no topo'}" aria-label="Fixar sala">${icon('i-star')}</button>`
+      + `<button class="ib del" type="button" title="Tirar da lista" aria-label="Tirar da lista">${icon('i-x', 'ic sm')}</button>`;
+    li.querySelector('.rn').textContent = r.room;
+    li.querySelector('.when').textContent = r.pinned ? 'fixada' : ago(r.last);
+    li.querySelector('.room-go').addEventListener('click', () => {
+      $('#room').value = r.room;
+      if (!$('#name').value.trim()) { $('#name').focus(); toast('Coloca seu nome primeiro'); return; }
+      join();
+    });
+    li.querySelector('.pin').addEventListener('click', () => setPinned(r.room, !r.pinned));
+    li.querySelector('.del').addEventListener('click', () => forgetRoom(r.room));
+    ul.appendChild(li);
+  }
+}
+function updatePinBtn() {
+  const on = !!loadRooms().find(r => r.room === S.room)?.pinned, b = $('#pinRoom');
+  b.classList.toggle('pinned', on); b.setAttribute('aria-pressed', on);
+  b.title = on ? 'Sala fixada no início. Clica pra desafixar.' : 'Fixar esta sala no topo da lista do início';
+}
+$('#pinRoom').addEventListener('click', () => {
+  const on = !loadRooms().find(r => r.room === S.room)?.pinned;
+  setPinned(S.room, on);
+  toast(on ? 'Sala fixada na lista do início.' : 'Sala desafixada.');
+});
+renderRooms();
 (!$('#name').value ? $('#name') : $('#room')).focus();
 
 $('#joinForm').addEventListener('submit', e => { e.preventDefault(); join(); });
@@ -436,6 +557,7 @@ function join() {
   store.set('telinha.name', S.name);
   try { history.replaceState(null, '', '#' + room); } catch {}
   try { sessionStorage.setItem('telinha.in', room); } catch {} // F5 volta direto pra sala
+  touchRoom(room); updatePinBtn();
 
   $('#lobby').hidden = true; $('#app').hidden = false;
   $('#roomName').textContent = room;
@@ -741,23 +863,31 @@ function updateCamBtn() {
   b.title = S.cam ? 'Desliga sua câmera' : 'Liga sua câmera pros amigos (sem som: a voz continua no Discord)';
 }
 
-// Ícone SVG do sprite lá de cima.
-const icon = (id, cls = 'ic') => `<svg class="${cls}" aria-hidden="true"><use href="#${id}"/></svg>`;
-
 async function startShare() {
-  const q = S.quality;
+  const q = S.quality, mode = audioMode();
   let stream;
   try {
     stream = await navigator.mediaDevices.getDisplayMedia({
       video: { frameRate: { ideal: q.fps, max: q.fps }, height: { ideal: q.h, max: q.h } },
-      audio: $('#audio').checked,
-      systemAudio: 'include', selfBrowserSurface: 'exclude', surfaceSwitching: 'include',
+      // restrictOwnAudio: não manda de volta o som dos amigos que está tocando aqui no Telinha.
+      audio: mode === 'none' ? false : { restrictOwnAudio: true, echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+      systemAudio: mode === 'system' ? 'include' : 'exclude',              // tela inteira: som do PC todo (ou nada)
+      windowAudio: mode === 'system' ? 'system' : mode === 'window' ? 'window' : 'exclude', // janela: só o som dela
+      selfBrowserSurface: 'exclude', surfaceSwitching: 'include',
     });
   } catch (e) {
     if (e.name !== 'NotAllowedError' && e.name !== 'AbortError') toast('Não deu pra capturar a tela: ' + e.message);
     return;
   }
   const v = stream.getVideoTracks()[0];
+  const surf = v.getSettings?.().displaySurface || '?', hasAudio = stream.getAudioTracks().length > 0;
+  const SURF = { monitor: 'a tela inteira', window: 'uma janela', browser: 'uma aba' };
+  log(`compartilhando ${SURF[surf] || surf}, ${hasAudio ? 'com som' : 'sem som'} (som: ${mode})`);
+  if (mode !== 'none' && !hasAudio) {
+    toast(surf === 'monitor' && mode === 'window'
+      ? 'Tela inteira vai sem som no modo "Só do jogo". Pra ter o som do jogo, compartilha a janela dele.'
+      : 'O som não veio junto. Na janela de escolha, deixa marcado "Compartilhar áudio". Se nem aparecer, usa o modo "PC todo" nos ajustes.', 8000);
+  }
   try { v.contentHint = q.hint; } catch {}
   v.addEventListener('ended', stopShare); // botão "Parar de compartilhar" do navegador
   S.screen = stream;
@@ -1009,10 +1139,6 @@ $('#quality').addEventListener('change', () => {
   updateUpload();
 });
 
-$('#audio').addEventListener('change', () => {
-  store.set('telinha.audio', $('#audio').checked ? '1' : '0');
-  if (S.screen) toast('Vale na próxima vez que compartilhar.');
-});
 
 $('#copy').addEventListener('click', async () => {
   const isFile = location.protocol === 'file:';
